@@ -61,10 +61,23 @@ class KoatsumeApp:
     
     def add_discovered_instance(self, info):
         """Add a discovered instance to the list"""
+        import socket
+        
+        # Convert addresses to human-readable format
+        addresses = []
+        for addr in info.addresses:
+            try:
+                if len(addr) == 4:  # IPv4
+                    addresses.append(socket.inet_ntoa(addr))
+                elif len(addr) == 16:  # IPv6
+                    addresses.append(socket.inet_ntop(socket.AF_INET6, addr))
+            except Exception:
+                addresses.append(addr.hex())
+        
         instance = {
             "name": info.name,
             "server": info.server,
-            "addresses": [addr.hex() for addr in info.addresses],
+            "addresses": addresses,
             "port": info.port,
             "properties": {k.decode(): v.decode() for k, v in info.properties.items()} if info.properties else {}
         }
@@ -120,8 +133,17 @@ class KoatsumeApp:
         finally:
             s.close()
         
-        # Parse IP address
-        addresses = [socket.inet_aton(local_ip)]
+        # Parse IP address - handle both IPv4 and IPv6
+        try:
+            # Try IPv4 first
+            if ':' not in local_ip:
+                addresses = [socket.inet_aton(local_ip)]
+            else:
+                # IPv6
+                addresses = [socket.inet_pton(socket.AF_INET6, local_ip)]
+        except Exception as e:
+            print(f"Error parsing IP address {local_ip}: {e}")
+            addresses = [socket.inet_aton('127.0.0.1')]
         
         self.service_info = ServiceInfo(
             "_koatsume._tcp.local.",
@@ -488,8 +510,8 @@ def main():
     """Main entry point"""
     app = KoatsumeApp()
     
-    # Start zeroconf in a background thread
-    zeroconf_thread = threading.Thread(target=app.start_zeroconf, daemon=True)
+    # Start zeroconf in a regular background thread for proper cleanup
+    zeroconf_thread = threading.Thread(target=app.start_zeroconf, daemon=False)
     zeroconf_thread.start()
     
     # Create window
@@ -502,10 +524,10 @@ def main():
         resizable=True
     )
     
-    # Start the GUI
+    # Start the GUI (this blocks until window is closed)
     webview.start()
     
-    # Cleanup
+    # Cleanup after window is closed
     app.stop_zeroconf()
 
 
