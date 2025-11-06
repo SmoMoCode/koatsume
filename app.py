@@ -21,10 +21,13 @@ class KoatsumeApp:
         self.config_file = Path("config.json")
         self.config = self.load_config()
         self.discovered_instances = []
+        self.hidden_instances = set()  # Track instances hidden by user
         self.zeroconf = None
         self.browser = None
         self.service_info = None
         self.window = None
+        self.heartbeat_thread = None
+        self.running = True
         
     def load_config(self):
         """Load configuration from JSON file"""
@@ -57,7 +60,29 @@ class KoatsumeApp:
     
     def get_discovered_instances(self):
         """Get list of discovered instances"""
-        return self.discovered_instances
+        current_time = time.time()
+        result = []
+        for instance in self.discovered_instances:
+            # Skip hidden instances
+            if instance["name"] in self.hidden_instances:
+                continue
+            
+            # Calculate if instance is connected (seen within last 1 second)
+            time_since_seen = current_time - instance["last_seen"]
+            instance_copy = instance.copy()
+            instance_copy["connected"] = time_since_seen <= 1.0
+            instance_copy["time_since_seen"] = time_since_seen
+            result.append(instance_copy)
+        
+        return result
+    
+    def hide_instance(self, name):
+        """Hide an instance from the view"""
+        self.hidden_instances.add(name)
+        # Update UI if window exists
+        if self.window:
+            self.window.evaluate_js('updateInstances()')
+        return {"status": "success"}
     
     def add_discovered_instance(self, info):
         """Add a discovered instance to the list"""
@@ -74,21 +99,31 @@ class KoatsumeApp:
             except Exception:
                 addresses.append(addr.hex())
         
+        current_time = time.time()
         instance = {
             "name": info.name,
             "server": info.server,
             "addresses": addresses,
             "port": info.port,
-            "properties": {k.decode(): v.decode() for k, v in info.properties.items()} if info.properties else {}
+            "properties": {k.decode(): v.decode() for k, v in info.properties.items()} if info.properties else {},
+            "last_seen": current_time,
+            "connected": True
         }
         
         # Check if already exists
         for i, existing in enumerate(self.discovered_instances):
             if existing["name"] == instance["name"]:
+                # Update existing instance, preserve last_seen if it's very recent
+                instance["last_seen"] = current_time
+                instance["connected"] = True
                 self.discovered_instances[i] = instance
+                # Remove from hidden list if it reappears
+                self.hidden_instances.discard(instance["name"])
                 return
         
         self.discovered_instances.append(instance)
+        # Remove from hidden list if it reappears
+        self.hidden_instances.discard(instance["name"])
         
         # Update UI if window exists
         if self.window:
@@ -102,6 +137,16 @@ class KoatsumeApp:
         if self.window:
             self.window.evaluate_js('updateInstances()')
     
+    def check_heartbeat(self):
+        """Periodically check instance heartbeats"""
+        while self.running:
+            time.sleep(1)  # Check every second
+            if self.window:
+                try:
+                    self.window.evaluate_js('updateInstances()')
+                except Exception:
+                    pass
+    
     def start_zeroconf(self):
         """Start zeroconf service discovery"""
         self.zeroconf = Zeroconf()
@@ -112,6 +157,10 @@ class KoatsumeApp:
         # Browse for other instances
         listener = ServiceListener(self)
         self.browser = ServiceBrowser(self.zeroconf, "_koatsume._tcp.local.", listener)
+        
+        # Start heartbeat checking thread
+        self.heartbeat_thread = threading.Thread(target=self.check_heartbeat, daemon=True)
+        self.heartbeat_thread.start()
     
     def register_service(self):
         """Register this instance as a zeroconf service"""
@@ -171,6 +220,8 @@ class KoatsumeApp:
     
     def stop_zeroconf(self):
         """Stop zeroconf service"""
+        self.running = False
+        
         if self.service_info and self.zeroconf:
             try:
                 self.zeroconf.unregister_service(self.service_info)
@@ -338,6 +389,7 @@ def get_html():
             color: white;
             box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
             transition: all 0.3s;
+            position: relative;
         }
         
         .instance-tile:nth-child(2n) {
@@ -361,6 +413,50 @@ def get_html():
             box-shadow: 0 8px 20px rgba(0, 0, 0, 0.25);
         }
         
+        .instance-tile.disconnected {
+            position: relative;
+            filter: grayscale(100%);
+            opacity: 0.7;
+        }
+        
+        .instance-tile.disconnected::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(128, 128, 128, 0.4);
+            border-radius: 12px;
+            pointer-events: none;
+        }
+        
+        .close-btn {
+            position: absolute;
+            top: 8px;
+            right: 8px;
+            width: 32px;
+            height: 32px;
+            border-radius: 50%;
+            background: rgba(255, 255, 255, 0.9);
+            color: #333;
+            border: 2px solid rgba(0, 0, 0, 0.2);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            cursor: pointer;
+            font-size: 20px;
+            font-weight: bold;
+            transition: all 0.2s;
+            z-index: 10;
+        }
+        
+        .close-btn:hover {
+            background: rgba(255, 255, 255, 1);
+            transform: scale(1.1);
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+        }
+        
         .instance-name {
             font-size: 18px;
             font-weight: bold;
@@ -377,6 +473,13 @@ def get_html():
             margin-top: 4px;
             font-size: 12px;
             opacity: 0.85;
+        }
+        
+        .instance-status {
+            margin-top: 8px;
+            font-size: 13px;
+            font-weight: 500;
+            opacity: 0.9;
         }
         
         .empty-state {
@@ -450,7 +553,7 @@ def get_html():
             
             // Start polling for instances
             updateInstances();
-            setInterval(updateInstances, 2000);
+            setInterval(updateInstances, 500);  // Update every 500ms for responsive disconnection detection
         });
         
         async function saveUsername() {
@@ -472,6 +575,29 @@ def get_html():
             }
         }
         
+        function formatTimeSince(seconds) {
+            if (seconds < 60) {
+                return `${Math.floor(seconds)} seconds ago`;
+            } else if (seconds < 3600) {
+                const minutes = Math.floor(seconds / 60);
+                return `${minutes} minute${minutes !== 1 ? 's' : ''} ago`;
+            } else if (seconds < 86400) {
+                const hours = Math.floor(seconds / 3600);
+                return `${hours} hour${hours !== 1 ? 's' : ''} ago`;
+            } else {
+                const days = Math.floor(seconds / 86400);
+                return `${days} day${days !== 1 ? 's' : ''} ago`;
+            }
+        }
+        
+        async function hideInstance(name) {
+            try {
+                await pywebview.api.hide_instance(name);
+            } catch (e) {
+                console.error('Error hiding instance:', e);
+            }
+        }
+        
         async function updateInstances() {
             try {
                 const instances = await pywebview.api.get_discovered_instances();
@@ -487,11 +613,21 @@ def get_html():
                 } else {
                     container.innerHTML = instances.map(instance => {
                         const username = instance.properties?.username || 'Unknown';
+                        const disconnectedClass = instance.connected ? '' : 'disconnected';
+                        const statusText = instance.connected 
+                            ? '✅ Connected' 
+                            : `⏰ Last seen ${formatTimeSince(instance.time_since_seen)}`;
+                        const closeBtn = !instance.connected 
+                            ? `<div class="close-btn" onclick="hideInstance('${instance.name}')">✕</div>`
+                            : '';
+                        
                         return `
-                            <div class="instance-tile">
+                            <div class="instance-tile ${disconnectedClass}">
+                                ${closeBtn}
                                 <div class="instance-name">👤 ${username}</div>
                                 <div class="instance-info">📡 ${instance.name.split('.')[0]}</div>
                                 <div class="instance-server">🖥️ ${instance.server}</div>
+                                <div class="instance-status">${statusText}</div>
                             </div>
                         `;
                     }).join('');
