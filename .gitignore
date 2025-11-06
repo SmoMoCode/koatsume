@@ -22,3 +22,7 @@ config.json
 # OS
 .DS_Store
 Thumbs.db
+
+# Test files
+test_*.py
+test_*.html
