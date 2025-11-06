@@ -44,7 +44,14 @@ The script will:
 If you prefer to set up manually:
 
 ```bash
+# On Linux: Install system dependencies first
+# Ubuntu/Debian:
+sudo apt-get install python3-gi python3-gi-cairo gir1.2-gtk-3.0 gir1.2-webkit2-4.1
+
 # Create virtual environment
+# On Linux, use --system-site-packages to access system GTK packages:
+python3 -m venv --system-site-packages venv
+# On macOS/Windows:
 python3 -m venv venv
 
 # Activate virtual environment
@@ -85,7 +92,13 @@ The app creates a `config.json` file in the same directory to store your usernam
 ## Troubleshooting
 
 ### Linux
-- The `start.sh` script automatically detects and installs required system packages (GTK, WebKit) on Ubuntu/Debian, Fedora, and RHEL/CentOS
+- The `start.sh` script automatically:
+  - Detects and installs required system packages (GTK, WebKit) on Ubuntu/Debian, Fedora, and RHEL/CentOS
+  - Creates virtual environment with `--system-site-packages` to access system GTK packages
+  - Recreates venv if it exists without system-site-packages enabled
+- If you get "GTK cannot be loaded" error:
+  - Delete the `venv` folder and run `./start.sh` again
+  - The script will recreate the venv with proper system package access
 - If you get an error about missing dependencies or want to install manually:
   ```bash
   # Ubuntu/Debian

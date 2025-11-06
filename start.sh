@@ -132,10 +132,33 @@ fi
 # Create virtual environment if it doesn't exist
 if [ ! -d "venv" ]; then
     echo "📦 Creating virtual environment..."
-    python3 -m venv venv
-    echo "✓ Virtual environment created"
+    if [[ "$OSTYPE" == "linux-gnu"* ]]; then
+        # On Linux, use system-site-packages to access system PyGObject/GTK
+        python3 -m venv --system-site-packages venv
+        echo "✓ Virtual environment created (with system site packages for GTK access)"
+    else
+        python3 -m venv venv
+        echo "✓ Virtual environment created"
+    fi
 else
-    echo "✓ Virtual environment already exists"
+    # Check if venv needs to be recreated on Linux (for system-site-packages)
+    if [[ "$OSTYPE" == "linux-gnu"* ]]; then
+        if [ -f "venv/pyvenv.cfg" ]; then
+            if ! grep -q "include-system-site-packages = true" venv/pyvenv.cfg; then
+                echo "⚠️  Existing venv doesn't have system-site-packages enabled"
+                echo "📦 Recreating virtual environment with system-site-packages..."
+                rm -rf venv
+                python3 -m venv --system-site-packages venv
+                echo "✓ Virtual environment recreated (with system site packages for GTK access)"
+            else
+                echo "✓ Virtual environment already exists"
+            fi
+        else
+            echo "✓ Virtual environment already exists"
+        fi
+    else
+        echo "✓ Virtual environment already exists"
+    fi
 fi
 
 # Activate virtual environment
