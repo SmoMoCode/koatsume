@@ -440,7 +440,7 @@ def get_html():
     
     <script>
         // Load username on startup
-        window.addEventListener('DOMContentLoaded', async () => {
+        window.addEventListener('pywebviewready', async () => {
             try {
                 const username = await pywebview.api.get_username();
                 document.getElementById('username').value = username;
