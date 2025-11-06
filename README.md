@@ -21,8 +21,9 @@ An app to connect lots of little things together.
    ```
 
 The script will:
+- Check and install system dependencies (GTK, WebKit) if needed (Linux only, requires sudo)
 - Create a virtual environment (if it doesn't exist)
-- Install all required dependencies
+- Install all required Python dependencies
 - Launch the application
 
 ### Windows
@@ -84,13 +85,17 @@ The app creates a `config.json` file in the same directory to store your usernam
 ## Troubleshooting
 
 ### Linux
-- If you get an error about missing dependencies for PyWebView, install the required system packages:
+- The `start.sh` script automatically detects and installs required system packages (GTK, WebKit) on Ubuntu/Debian, Fedora, and RHEL/CentOS
+- If you get an error about missing dependencies or want to install manually:
   ```bash
   # Ubuntu/Debian
-  sudo apt-get install python3-gi python3-gi-cairo gir1.2-gtk-3.0 gir1.2-webkit2-4.0
+  sudo apt-get install python3-gi python3-gi-cairo gir1.2-gtk-3.0 gir1.2-webkit2-4.1
   
   # Fedora
   sudo dnf install python3-gobject gtk3 webkit2gtk3
+  
+  # RHEL/CentOS
+  sudo yum install python3-gobject gtk3 webkit2gtk3
   ```
 
 ### macOS
