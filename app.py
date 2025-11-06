@@ -113,7 +113,7 @@ class KoatsumeApp:
         # Check if already exists
         for i, existing in enumerate(self.discovered_instances):
             if existing["name"] == instance["name"]:
-                # Update existing instance, preserve last_seen if it's very recent
+                # Update existing instance with fresh timestamp
                 instance["last_seen"] = current_time
                 instance["connected"] = True
                 self.discovered_instances[i] = instance
@@ -140,7 +140,7 @@ class KoatsumeApp:
     def check_heartbeat(self):
         """Periodically check instance heartbeats"""
         while self.running:
-            time.sleep(1)  # Check every second
+            time.sleep(0.5)  # Check every 500ms to match UI update frequency
             if self.window:
                 try:
                     self.window.evaluate_js('updateInstances()')
@@ -590,6 +590,12 @@ def get_html():
             }
         }
         
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+        
         async function hideInstance(name) {
             try {
                 await pywebview.api.hide_instance(name);
@@ -611,26 +617,35 @@ def get_html():
                         </div>
                     `;
                 } else {
-                    container.innerHTML = instances.map(instance => {
-                        const username = instance.properties?.username || 'Unknown';
+                    container.innerHTML = instances.map((instance, index) => {
+                        const username = escapeHtml(instance.properties?.username || 'Unknown');
                         const disconnectedClass = instance.connected ? '' : 'disconnected';
                         const statusText = instance.connected 
                             ? '✅ Connected' 
                             : `⏰ Last seen ${formatTimeSince(instance.time_since_seen)}`;
                         const closeBtn = !instance.connected 
-                            ? `<div class="close-btn" onclick="hideInstance('${instance.name}')">✕</div>`
+                            ? `<div class="close-btn" data-instance-index="${index}">✕</div>`
                             : '';
                         
                         return `
-                            <div class="instance-tile ${disconnectedClass}">
+                            <div class="instance-tile ${disconnectedClass}" data-instance-name="${escapeHtml(instance.name)}">
                                 ${closeBtn}
                                 <div class="instance-name">👤 ${username}</div>
-                                <div class="instance-info">📡 ${instance.name.split('.')[0]}</div>
-                                <div class="instance-server">🖥️ ${instance.server}</div>
+                                <div class="instance-info">📡 ${escapeHtml(instance.name.split('.')[0])}</div>
+                                <div class="instance-server">🖥️ ${escapeHtml(instance.server)}</div>
                                 <div class="instance-status">${statusText}</div>
                             </div>
                         `;
                     }).join('');
+                    
+                    // Add event listeners for close buttons
+                    document.querySelectorAll('.close-btn').forEach(btn => {
+                        btn.addEventListener('click', (e) => {
+                            const tile = e.target.closest('.instance-tile');
+                            const instanceName = tile.getAttribute('data-instance-name');
+                            hideInstance(instanceName);
+                        });
+                    });
                 }
             } catch (e) {
                 console.error('Error updating instances:', e);
