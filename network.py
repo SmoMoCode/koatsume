@@ -377,20 +377,22 @@ class NetworkManager:
             except Exception:
                 pass
     
-    def connect_to_peer(self, peer_name: str, peer_address: str, peer_port: int):
+    def connect_to_peer(self, peer_name: str, peer_address: str, peer_port: int, peer_udp_port: Optional[int] = None):
         """Initiate connection to a discovered peer"""
         with self.peers_lock:
             if peer_name in self.peers:
                 return  # Already connected
             
             # Create peer connection
-            # The peer's TCP port is advertised via zeroconf
-            # The peer's UDP port is the base UDP port (same for all peers)
+            # The peer's TCP port and UDP port are advertised via zeroconf
+            if peer_udp_port is None:
+                peer_udp_port = self.base_udp_port
+            
             peer = PeerConnection(
                 peer_name=peer_name,
                 peer_address=peer_address,
                 tcp_port=peer_port if peer_port > 0 else self.base_tcp_port,
-                udp_port=self.base_udp_port,  # All peers use the same UDP port
+                udp_port=peer_udp_port,
                 username=self.username,
                 udp_socket=self.udp_socket,  # Share the UDP socket
                 on_mouse_data=self._handle_mouse_data,

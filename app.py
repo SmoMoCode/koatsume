@@ -144,10 +144,19 @@ class KoatsumeApp:
             
             # Connect to the new peer via network manager
             if self.network_manager and addresses:
+                # Extract UDP port from properties
+                udp_port = 51000  # Default
+                if instance["properties"].get("udp_port"):
+                    try:
+                        udp_port = int(instance["properties"]["udp_port"])
+                    except (ValueError, KeyError):
+                        pass
+                
                 self.network_manager.connect_to_peer(
                     peer_name=instance["name"],
                     peer_address=addresses[0],
-                    peer_port=info.port
+                    peer_port=info.port,
+                    peer_udp_port=udp_port
                 )
         
         # Update UI if window exists
@@ -232,12 +241,18 @@ class KoatsumeApp:
             print(f"Error parsing IP address {local_ip}: {e}")
             addresses = [socket.inet_aton('127.0.0.1')]
         
+        # Get UDP port from network manager
+        udp_port = self.network_manager.udp_port if self.network_manager else 0
+        
         self.service_info = ServiceInfo(
             "_koatsume._tcp.local.",
             service_name,
             addresses=addresses,
             port=self.tcp_listen_port,  # Use actual TCP listen port
-            properties={b"username": username.encode()},
+            properties={
+                b"username": username.encode(),
+                b"udp_port": str(udp_port).encode()
+            },
             server=f"{hostname}.local."
         )
         
