@@ -36,6 +36,7 @@ class KoatsumeApp:
         self.network_manager = None
         self.mouse_capture = None
         self.received_mouse_data = {}  # peer_name -> mouse data
+        self.tcp_listen_port = 0  # Will be allocated by network manager
         
     def load_config(self):
         """Load configuration from JSON file"""
@@ -173,9 +174,18 @@ class KoatsumeApp:
     
     def start_zeroconf(self):
         """Start zeroconf service discovery"""
+        # Start network manager first to get the listen port
+        self.network_manager = NetworkManager(
+            username=self.config.get("username", "Anonymous"),
+            on_mouse_data=self._handle_mouse_data
+        )
+        self.network_manager.start()
+        self.tcp_listen_port = self.network_manager.get_listen_port()
+        
+        # Start zeroconf
         self.zeroconf = Zeroconf()
         
-        # Register our service
+        # Register our service with the actual port
         self.register_service()
         
         # Browse for other instances
@@ -185,13 +195,6 @@ class KoatsumeApp:
         # Start heartbeat checking thread
         self.heartbeat_thread = threading.Thread(target=self.check_heartbeat, daemon=True)
         self.heartbeat_thread.start()
-        
-        # Start network manager
-        self.network_manager = NetworkManager(
-            username=self.config.get("username", "Anonymous"),
-            on_mouse_data=self._handle_mouse_data
-        )
-        self.network_manager.start()
         
         # Start mouse capture
         self.mouse_capture = MouseCapture(on_mouse_update=self._handle_mouse_update)
@@ -233,7 +236,7 @@ class KoatsumeApp:
             "_koatsume._tcp.local.",
             service_name,
             addresses=addresses,
-            port=0,  # We're not actually listening on a port yet
+            port=self.tcp_listen_port,  # Use actual TCP listen port
             properties={b"username": username.encode()},
             server=f"{hostname}.local."
         )

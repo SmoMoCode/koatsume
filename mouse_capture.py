@@ -10,9 +10,13 @@ from typing import Optional, Callable
 try:
     from pynput import mouse
     PYNPUT_AVAILABLE = True
-except ImportError:
+except (ImportError, Exception) as e:
     PYNPUT_AVAILABLE = False
-    print("Warning: pynput not available, mouse capture will use simulated data")
+    # Only print warning once at module level
+    import sys
+    if not hasattr(sys, '_mouse_capture_warning_shown'):
+        print(f"Info: Mouse capture will use simulated data (pynput unavailable: {type(e).__name__})")
+        sys._mouse_capture_warning_shown = True
 
 
 class MouseCapture:
@@ -38,13 +42,19 @@ class MouseCapture:
         self.running = True
         
         if PYNPUT_AVAILABLE:
-            # Use pynput to capture mouse events
-            self.listener = mouse.Listener(
-                on_move=self._on_move,
-                on_click=self._on_click,
-                on_scroll=self._on_scroll
-            )
-            self.listener.start()
+            try:
+                # Use pynput to capture mouse events
+                self.listener = mouse.Listener(
+                    on_move=self._on_move,
+                    on_click=self._on_click,
+                    on_scroll=self._on_scroll
+                )
+                self.listener.start()
+                print("Mouse capture started with pynput")
+            except Exception as e:
+                print(f"Failed to start pynput listener: {e}, falling back to simulation")
+                self.update_thread = threading.Thread(target=self._simulate_mouse, daemon=True)
+                self.update_thread.start()
         else:
             # Use simulated mouse data
             self.update_thread = threading.Thread(target=self._simulate_mouse, daemon=True)

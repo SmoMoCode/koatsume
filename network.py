@@ -339,7 +339,7 @@ class NetworkManager:
         # Port allocation
         self.base_tcp_port = 50000
         self.base_udp_port = 51000
-        self.next_port_offset = 0
+        self.next_port_offset = 1  # Start at 1, 0 is for our listener
         
         # Peer connections
         self.peers: Dict[str, PeerConnection] = {}
@@ -347,6 +347,7 @@ class NetworkManager:
         
         # TCP listener for incoming connections
         self.tcp_listener = None
+        self.tcp_listen_port = 0
         self.tcp_listener_thread = None
         self.running = False
     
@@ -354,9 +355,21 @@ class NetworkManager:
         """Start the network manager"""
         self.running = True
         
+        # Create TCP listener socket
+        self.tcp_listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.tcp_listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.tcp_listener.bind(('0.0.0.0', self.base_tcp_port))
+        self.tcp_listener.listen(5)
+        self.tcp_listen_port = self.tcp_listener.getsockname()[1]
+        print(f"TCP listener started on port {self.tcp_listen_port}")
+        
         # Start TCP listener for incoming handshakes
         self.tcp_listener_thread = threading.Thread(target=self._tcp_listener_loop, daemon=True)
         self.tcp_listener_thread.start()
+    
+    def get_listen_port(self):
+        """Get the TCP listen port"""
+        return self.tcp_listen_port
     
     def stop(self):
         """Stop the network manager"""
@@ -427,6 +440,52 @@ class NetworkManager:
     
     def _tcp_listener_loop(self):
         """Listen for incoming TCP connections"""
-        # For now, we're initiating connections only
-        # In a full implementation, we'd listen for incoming connections here
-        pass
+        while self.running:
+            try:
+                self.tcp_listener.settimeout(1.0)
+                conn, addr = self.tcp_listener.accept()
+                print(f"Incoming connection from {addr}")
+                
+                # Handle the connection in a separate thread
+                threading.Thread(
+                    target=self._handle_incoming_connection,
+                    args=(conn, addr),
+                    daemon=True
+                ).start()
+                
+            except socket.timeout:
+                continue
+            except Exception as e:
+                if self.running:
+                    print(f"TCP listener error: {e}")
+                break
+    
+    def _handle_incoming_connection(self, conn, addr):
+        """Handle an incoming TCP connection"""
+        try:
+            # Read handshake
+            conn.settimeout(5.0)
+            buffer = b''
+            while True:
+                chunk = conn.recv(1024)
+                if not chunk:
+                    break
+                buffer += chunk
+                if b'\n' in buffer:
+                    line, buffer = buffer.split(b'\n', 1)
+                    msg = TCPMessage.unpack(line)
+                    if msg and msg.get('type') == 'handshake':
+                        print(f"Received incoming handshake: {msg}")
+                        # For now, just acknowledge and close
+                        # Full implementation would establish reverse connection
+                        response = TCPMessage.pack_handshake(
+                            self.tcp_listen_port,
+                            self.base_udp_port,
+                            self.username
+                        )
+                        conn.sendall(response)
+                        break
+            
+            conn.close()
+        except Exception as e:
+            print(f"Error handling incoming connection: {e}")
