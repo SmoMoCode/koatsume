@@ -114,17 +114,16 @@ class PeerConnection:
     
     def __init__(self, peer_name: str, peer_address: str, 
                  tcp_port: int, udp_port: int,
-                 local_tcp_port: int, local_udp_port: int,
                  username: str,
+                 udp_socket: socket.socket,  # Shared UDP socket
                  on_mouse_data: Optional[Callable] = None,
                  on_disconnect: Optional[Callable] = None):
         self.peer_name = peer_name
         self.peer_address = peer_address
         self.tcp_port = tcp_port
         self.udp_port = udp_port
-        self.local_tcp_port = local_tcp_port
-        self.local_udp_port = local_udp_port
         self.username = username
+        self.udp_socket = udp_socket  # Shared UDP socket for sending
         self.on_mouse_data = on_mouse_data
         self.on_disconnect = on_disconnect
         
@@ -138,14 +137,12 @@ class PeerConnection:
         self.last_tx_time = 0
         self.last_rx_time = 0
         
-        # Sockets
+        # TCP socket
         self.tcp_socket = None
-        self.udp_socket = None
         
         # Threads
         self.tcp_thread = None
         self.udp_tx_thread = None
-        self.udp_rx_thread = None
         self.heartbeat_thread = None
         
         # Mouse state
@@ -159,17 +156,9 @@ class PeerConnection:
         """Start the peer connection"""
         self.running = True
         
-        # Create UDP socket
-        self.udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self.udp_socket.bind(('0.0.0.0', self.local_udp_port))
-        self.udp_socket.settimeout(0.1)
-        
         # Start threads
         self.udp_tx_thread = threading.Thread(target=self._udp_transmit_loop, daemon=True)
         self.udp_tx_thread.start()
-        
-        self.udp_rx_thread = threading.Thread(target=self._udp_receive_loop, daemon=True)
-        self.udp_rx_thread.start()
         
         self.tcp_thread = threading.Thread(target=self._tcp_connect_and_sync, daemon=True)
         self.tcp_thread.start()
@@ -190,12 +179,6 @@ class PeerConnection:
             except Exception:
                 pass
         
-        if self.udp_socket:
-            try:
-                self.udp_socket.close()
-            except Exception:
-                pass
-        
         print(f"Stopped peer connection to {self.peer_name}")
     
     def update_mouse_state(self, x: int, y: int, wheel_x: int = 0, wheel_y: int = 0, buttons: int = 0):
@@ -205,6 +188,12 @@ class PeerConnection:
         self.mouse_wheel_x = wheel_x
         self.mouse_wheel_y = wheel_y
         self.mouse_buttons = buttons
+    
+    def notify_packet_received(self, rx_bytes: int):
+        """Notify that a packet was received from this peer"""
+        self.rx_packets += 1
+        self.rx_bytes += rx_bytes
+        self.last_rx_time = time.time()
     
     def _tcp_connect_and_sync(self):
         """Connect to peer via TCP and send periodic sync messages"""
@@ -289,28 +278,6 @@ class PeerConnection:
                 print(f"UDP transmit error to {self.peer_name}: {e}")
                 time.sleep(0.1)
     
-    def _udp_receive_loop(self):
-        """Receive UDP packets"""
-        while self.running:
-            try:
-                data, addr = self.udp_socket.recvfrom(1024)
-                
-                self.rx_packets += 1
-                self.rx_bytes += len(data)
-                self.last_rx_time = time.time()
-                
-                packet = UDPPacket.unpack(data)
-                if packet:
-                    if packet['type'] == 'mouse_absolute' and self.on_mouse_data:
-                        self.on_mouse_data(self.peer_name, packet)
-                
-            except socket.timeout:
-                continue
-            except Exception as e:
-                if self.running:
-                    print(f"UDP receive error from {self.peer_name}: {e}")
-                time.sleep(0.1)
-    
     def _check_liveness(self):
         """Check if peer is still alive"""
         while self.running:
@@ -339,7 +306,6 @@ class NetworkManager:
         # Port allocation
         self.base_tcp_port = 50000
         self.base_udp_port = 51000
-        self.next_port_offset = 1  # Start at 1, 0 is for our listener
         
         # Peer connections
         self.peers: Dict[str, PeerConnection] = {}
@@ -349,6 +315,12 @@ class NetworkManager:
         self.tcp_listener = None
         self.tcp_listen_port = 0
         self.tcp_listener_thread = None
+        
+        # UDP socket (shared for all peers)
+        self.udp_socket = None
+        self.udp_port = 0
+        self.udp_rx_thread = None
+        
         self.running = False
     
     def start(self):
@@ -363,9 +335,21 @@ class NetworkManager:
         self.tcp_listen_port = self.tcp_listener.getsockname()[1]
         print(f"TCP listener started on port {self.tcp_listen_port}")
         
+        # Create UDP socket
+        self.udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.udp_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.udp_socket.bind(('0.0.0.0', self.base_udp_port))
+        self.udp_socket.settimeout(0.1)
+        self.udp_port = self.udp_socket.getsockname()[1]
+        print(f"UDP socket bound to port {self.udp_port}")
+        
         # Start TCP listener for incoming handshakes
         self.tcp_listener_thread = threading.Thread(target=self._tcp_listener_loop, daemon=True)
         self.tcp_listener_thread.start()
+        
+        # Start UDP receiver
+        self.udp_rx_thread = threading.Thread(target=self._udp_receive_loop, daemon=True)
+        self.udp_rx_thread.start()
     
     def get_listen_port(self):
         """Get the TCP listen port"""
@@ -386,6 +370,12 @@ class NetworkManager:
                 self.tcp_listener.close()
             except Exception:
                 pass
+        
+        if self.udp_socket:
+            try:
+                self.udp_socket.close()
+            except Exception:
+                pass
     
     def connect_to_peer(self, peer_name: str, peer_address: str, peer_port: int):
         """Initiate connection to a discovered peer"""
@@ -393,20 +383,16 @@ class NetworkManager:
             if peer_name in self.peers:
                 return  # Already connected
             
-            # Allocate ports for this peer
-            tcp_port = self.base_tcp_port + self.next_port_offset
-            udp_port = self.base_udp_port + self.next_port_offset
-            self.next_port_offset += 1
-            
             # Create peer connection
+            # The peer's TCP port is advertised via zeroconf
+            # The peer's UDP port is the base UDP port (same for all peers)
             peer = PeerConnection(
                 peer_name=peer_name,
                 peer_address=peer_address,
-                tcp_port=peer_port if peer_port > 0 else 50000,
-                udp_port=peer_port + 1000 if peer_port > 0 else 51000,
-                local_tcp_port=tcp_port,
-                local_udp_port=udp_port,
+                tcp_port=peer_port if peer_port > 0 else self.base_tcp_port,
+                udp_port=self.base_udp_port,  # All peers use the same UDP port
                 username=self.username,
+                udp_socket=self.udp_socket,  # Share the UDP socket
                 on_mouse_data=self._handle_mouse_data,
                 on_disconnect=self._handle_peer_disconnect
             )
@@ -480,7 +466,7 @@ class NetworkManager:
                         # Full implementation would establish reverse connection
                         response = TCPMessage.pack_handshake(
                             self.tcp_listen_port,
-                            self.base_udp_port,
+                            self.udp_port,
                             self.username
                         )
                         conn.sendall(response)
@@ -489,3 +475,37 @@ class NetworkManager:
             conn.close()
         except Exception as e:
             print(f"Error handling incoming connection: {e}")
+    
+    def _udp_receive_loop(self):
+        """Receive UDP packets from all peers"""
+        while self.running:
+            try:
+                data, addr = self.udp_socket.recvfrom(1024)
+                
+                # Parse packet
+                packet = UDPPacket.unpack(data)
+                if not packet:
+                    continue
+                
+                # Find which peer sent this
+                peer_address = addr[0]
+                peer = None
+                with self.peers_lock:
+                    for p in self.peers.values():
+                        if p.peer_address == peer_address:
+                            peer = p
+                            break
+                
+                if peer:
+                    # Update peer statistics
+                    peer.notify_packet_received(len(data))
+                    
+                    # Handle mouse data
+                    if packet['type'] == 'mouse_absolute':
+                        self._handle_mouse_data(peer.peer_name, packet)
+                
+            except socket.timeout:
+                continue
+            except Exception as e:
+                if self.running:
+                    print(f"UDP receive error: {e}")
