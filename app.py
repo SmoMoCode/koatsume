@@ -13,6 +13,9 @@ from pathlib import Path
 import webview
 from zeroconf import ServiceBrowser, ServiceInfo, Zeroconf
 
+from network import NetworkManager
+from mouse_capture import MouseCapture
+
 
 class KoatsumeApp:
     """Main application class for Koatsume"""
@@ -28,6 +31,12 @@ class KoatsumeApp:
         self.window = None
         self.heartbeat_thread = None
         self.running = True
+        
+        # Network and mouse
+        self.network_manager = None
+        self.mouse_capture = None
+        self.received_mouse_data = {}  # peer_name -> mouse data
+        self.tcp_listen_port = 0  # Will be allocated by network manager
         
     def load_config(self):
         """Load configuration from JSON file"""
@@ -72,6 +81,11 @@ class KoatsumeApp:
             instance_copy = instance.copy()
             instance_copy["connected"] = time_since_seen <= 1.0
             instance_copy["time_since_seen"] = time_since_seen
+            
+            # Add received mouse data if available
+            if instance["name"] in self.received_mouse_data:
+                instance_copy["mouse_data"] = self.received_mouse_data[instance["name"]]
+            
             result.append(instance_copy)
         
         return result
@@ -111,6 +125,7 @@ class KoatsumeApp:
         }
         
         # Check if already exists
+        is_new = True
         for i, existing in enumerate(self.discovered_instances):
             if existing["name"] == instance["name"]:
                 # Update existing instance with fresh timestamp
@@ -119,11 +134,30 @@ class KoatsumeApp:
                 self.discovered_instances[i] = instance
                 # Remove from hidden list if it reappears
                 self.hidden_instances.discard(instance["name"])
-                return
+                is_new = False
+                break
         
-        self.discovered_instances.append(instance)
-        # Remove from hidden list if it reappears
-        self.hidden_instances.discard(instance["name"])
+        if is_new:
+            self.discovered_instances.append(instance)
+            # Remove from hidden list if it reappears
+            self.hidden_instances.discard(instance["name"])
+            
+            # Connect to the new peer via network manager
+            if self.network_manager and addresses:
+                # Extract UDP port from properties
+                udp_port = 51000  # Default
+                if instance["properties"].get("udp_port"):
+                    try:
+                        udp_port = int(instance["properties"]["udp_port"])
+                    except (ValueError, KeyError):
+                        pass
+                
+                self.network_manager.connect_to_peer(
+                    peer_name=instance["name"],
+                    peer_address=addresses[0],
+                    peer_port=info.port,
+                    peer_udp_port=udp_port
+                )
         
         # Update UI if window exists
         if self.window:
@@ -149,9 +183,18 @@ class KoatsumeApp:
     
     def start_zeroconf(self):
         """Start zeroconf service discovery"""
+        # Start network manager first to get the listen port
+        self.network_manager = NetworkManager(
+            username=self.config.get("username", "Anonymous"),
+            on_mouse_data=self._handle_mouse_data
+        )
+        self.network_manager.start()
+        self.tcp_listen_port = self.network_manager.get_listen_port()
+        
+        # Start zeroconf
         self.zeroconf = Zeroconf()
         
-        # Register our service
+        # Register our service with the actual port
         self.register_service()
         
         # Browse for other instances
@@ -161,6 +204,10 @@ class KoatsumeApp:
         # Start heartbeat checking thread
         self.heartbeat_thread = threading.Thread(target=self.check_heartbeat, daemon=True)
         self.heartbeat_thread.start()
+        
+        # Start mouse capture
+        self.mouse_capture = MouseCapture(on_mouse_update=self._handle_mouse_update)
+        self.mouse_capture.start()
     
     def register_service(self):
         """Register this instance as a zeroconf service"""
@@ -194,12 +241,18 @@ class KoatsumeApp:
             print(f"Error parsing IP address {local_ip}: {e}")
             addresses = [socket.inet_aton('127.0.0.1')]
         
+        # Get UDP port from network manager
+        udp_port = self.network_manager.udp_port if self.network_manager else 0
+        
         self.service_info = ServiceInfo(
             "_koatsume._tcp.local.",
             service_name,
             addresses=addresses,
-            port=0,  # We're not actually listening on a port yet
-            properties={b"username": username.encode()},
+            port=self.tcp_listen_port,  # Use actual TCP listen port
+            properties={
+                b"username": username.encode(),
+                b"udp_port": str(udp_port).encode()
+            },
             server=f"{hostname}.local."
         )
         
@@ -222,6 +275,14 @@ class KoatsumeApp:
         """Stop zeroconf service"""
         self.running = False
         
+        # Stop mouse capture
+        if self.mouse_capture:
+            self.mouse_capture.stop()
+        
+        # Stop network manager
+        if self.network_manager:
+            self.network_manager.stop()
+        
         if self.service_info and self.zeroconf:
             try:
                 self.zeroconf.unregister_service(self.service_info)
@@ -230,6 +291,22 @@ class KoatsumeApp:
         
         if self.zeroconf:
             self.zeroconf.close()
+    
+    def _handle_mouse_update(self, x, y, wheel_x, wheel_y, buttons):
+        """Handle mouse state updates from mouse capture"""
+        if self.network_manager:
+            self.network_manager.update_mouse_state(x, y, wheel_x, wheel_y, buttons)
+    
+    def _handle_mouse_data(self, peer_name, packet):
+        """Handle received mouse data from network"""
+        self.received_mouse_data[peer_name] = {
+            'x': packet.get('x', 0),
+            'y': packet.get('y', 0),
+            'wheel_x': packet.get('wheel_x', 0),
+            'wheel_y': packet.get('wheel_y', 0),
+            'buttons': packet.get('buttons', 0),
+            'timestamp': time.time()
+        }
 
 
 class ServiceListener:
@@ -482,6 +559,19 @@ def get_html():
             opacity: 0.9;
         }
         
+        .mouse-data {
+            margin-top: 8px;
+            font-size: 12px;
+            font-family: monospace;
+            background: rgba(0, 0, 0, 0.2);
+            padding: 8px;
+            border-radius: 4px;
+        }
+        
+        .mouse-data-row {
+            margin: 2px 0;
+        }
+        
         .empty-state {
             text-align: center;
             padding: 40px;
@@ -596,6 +686,20 @@ def get_html():
             return div.innerHTML;
         }
         
+        function formatButtons(buttons) {
+            if (buttons === 0) return 'None';
+            const buttonNames = [];
+            if (buttons & 1) buttonNames.push('L');
+            if (buttons & 2) buttonNames.push('R');
+            if (buttons & 4) buttonNames.push('M');
+            if (buttons & 8) buttonNames.push('B4');
+            if (buttons & 16) buttonNames.push('B5');
+            if (buttons & 32) buttonNames.push('B6');
+            if (buttons & 64) buttonNames.push('B7');
+            if (buttons & 128) buttonNames.push('B8');
+            return buttonNames.join('+');
+        }
+        
         async function hideInstance(name) {
             try {
                 await pywebview.api.hide_instance(name);
@@ -627,6 +731,20 @@ def get_html():
                             ? `<div class="close-btn" data-instance-index="${index}">✕</div>`
                             : '';
                         
+                        // Format mouse data if available
+                        let mouseDataHtml = '';
+                        if (instance.mouse_data) {
+                            const md = instance.mouse_data;
+                            const buttonStates = formatButtons(md.buttons);
+                            mouseDataHtml = `
+                                <div class="mouse-data">
+                                    <div class="mouse-data-row">🖱️ Mouse Data:</div>
+                                    <div class="mouse-data-row">X: ${md.x}, Y: ${md.y}</div>
+                                    <div class="mouse-data-row">Buttons: ${buttonStates}</div>
+                                </div>
+                            `;
+                        }
+                        
                         return `
                             <div class="instance-tile ${disconnectedClass}" data-instance-name="${escapeHtml(instance.name)}">
                                 ${closeBtn}
@@ -634,6 +752,7 @@ def get_html():
                                 <div class="instance-info">📡 ${escapeHtml(instance.name.split('.')[0])}</div>
                                 <div class="instance-server">🖥️ ${escapeHtml(instance.server)}</div>
                                 <div class="instance-status">${statusText}</div>
+                                ${mouseDataHtml}
                             </div>
                         `;
                     }).join('');
